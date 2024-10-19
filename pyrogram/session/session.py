@@ -30,7 +30,7 @@ from pyrogram.connection import Connection
 from pyrogram.crypto import mtproto
 from pyrogram.errors import (
     RPCError, InternalServerError, AuthKeyDuplicated, FloodWait, FloodPremiumWait, ServiceUnavailable, BadMsgNotification,
-    SecurityCheckMismatch, Unauthorized
+    SecurityCheckMismatch, AuthKeyInvalid
 )
 from pyrogram.raw.all import layer
 from pyrogram.raw.core import TLObject, MsgContainer, Int, FutureSalts
@@ -142,10 +142,10 @@ class Session:
                 log.info("Session initialized: Layer %s", layer)
                 log.info("Device: %s - %s", self.client.device_model, self.client.app_version)
                 log.info("System: %s (%s)", self.client.system_version, self.client.lang_code)
-            except (AuthKeyDuplicated, Unauthorized) as e:
+            except (AuthKeyDuplicated, AuthKeyInvalid) as e:
                 await self.stop()
                 raise e
-            except (OSError, RPCError):
+            except (OSError, TimeoutError, RPCError):
                 await self.stop()
             except Exception as e:
                 await self.stop()
@@ -196,7 +196,7 @@ class Session:
                 self.auth_key,
                 self.auth_key_id
             )
-        except ValueError as e:
+        except SecurityCheckMismatch as e:
             log.debug(e)
             self.loop.create_task(self.restart())
             return
@@ -271,7 +271,7 @@ class Session:
 
             try:
                 await self.send(raw.types.MsgsAck(msg_ids=list(self.pending_acks)), False)
-            except OSError:
+            except (OSError, TimeoutError):
                 pass
             else:
                 self.pending_acks.clear()
@@ -293,10 +293,7 @@ class Session:
                         ping_id=0, disconnect_delay=self.WAIT_TIMEOUT + 10
                     ), False
                 )
-            except OSError:
-                self.loop.create_task(self.restart())
-                break
-            except RPCError:
+            except (OSError, TimeoutError, RPCError):
                 pass
 
         log.info("PingTask stopped")
@@ -312,10 +309,7 @@ class Session:
                     error_code = -Int.read(BytesIO(packet))
 
                     if error_code == 404:
-                        raise Unauthorized(
-                            "Auth key not found in the system. You must delete your session file "
-                            "and log in again with your phone number or bot token."
-                        )
+                        raise AuthKeyInvalid
 
                     log.warning(
                         "Server sent transport error: %s (%s)",
@@ -365,7 +359,7 @@ class Session:
             result = self.results.pop(msg_id).value
 
             if result is None:
-                raise TimeoutError("Request timed out")
+                raise TimeoutError
 
             if isinstance(result, raw.types.RpcError):
                 if isinstance(data, (raw.functions.InvokeWithoutUpdates, raw.functions.InvokeWithTakeout)):
@@ -414,7 +408,7 @@ class Session:
                             self.client.name, amount, query_name)
 
                 await asyncio.sleep(amount)
-            except (OSError, InternalServerError, ServiceUnavailable) as e:
+            except (OSError, TimeoutError, InternalServerError, ServiceUnavailable) as e:
                 if retries == 0:
                     raise e from None
 
